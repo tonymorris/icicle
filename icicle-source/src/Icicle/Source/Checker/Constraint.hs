@@ -303,12 +303,14 @@ generateQ qq@(Query (c:_) _) env
      -> do  (x', sx, consg) <- generateX x env
             let tgroup       = annResult $ annotOfExp x'
 
-            retk <- Temporality TemporalityElement <$> patTy ann k
-            retv <- Temporality TemporalityElement <$> patTy ann v
+            retk <- Temporality TemporalityElement . TypeVar <$> fresh
+            retv <- Temporality TemporalityElement . TypeVar <$> fresh
 
-            let env' = removeElementBinds $ substE sx env
-            (q', sq, t', consr)
-                <- rest =<< goPat ann k retk =<< goPat ann v retv env'
+            let env'        = removeElementBinds $ substE sx env
+            (a'env,k'cons) <- goPat ann v retv env'
+            (b'env,v'cons) <- goPat ann k retk a'env
+
+            (q', sq, t', consr) <- rest b'env
 
             consT  <-  requireAgg  t'
             consgt <-  requireAgg  tgroup
@@ -320,7 +322,7 @@ generateQ qq@(Query (c:_) _) env
                     $ Temporality TemporalityAggregate
                     $ Possibility poss t'
 
-            let cons' = concat [consg, consr, consT, consgt, consgd, consp]
+            let cons' = concat [consg, consr, consT, consgt, consgd, consp, k'cons, v'cons]
 
             let ss  = compose sx sq
             let q'' = with cons' q' t'' $ \a' -> GroupFold a' k v x'
@@ -388,7 +390,8 @@ generateQ qq@(Query (c:_) _) env
                     $ annResult $ annotOfExp i
 
             let env' = substE si env
-            (w,sw, csw) <- generateX (foldWork f) =<< goPat ann (foldBind f) ti env'
+            (env'',pat'cons'inner) <- goPat ann (foldBind f) ti env'
+            (w,sw, csw)            <- generateX (foldWork f) env''
 
             let bindType
                  | FoldTypeFoldl1 <- foldType f
@@ -402,8 +405,9 @@ generateQ qq@(Query (c:_) _) env
                  $ Temporality TemporalityAggregate
                  $ annResult $ annotOfExp w
 
-            let env'' = substE sw env'
-            (q', sq, t', consr) <- rest =<< goPat ann (foldBind f) bindType env''
+            let envX = substE sw env'
+            (env''', pat'cons'outer) <- goPat ann (foldBind f) bindType envX
+            (q', sq, t', consr)      <- rest env'''
 
             consf
               <- case foldType f of
@@ -422,7 +426,7 @@ generateQ qq@(Query (c:_) _) env
                        [ require a (CEquals it wt)
                        , require a (CPossibilityJoin iniPos wp' ip') ]
 
-            let cons' = concat [csi, csw, consr, consf, consT, conseq]
+            let cons' = concat [csi, csw, pat'cons'inner, pat'cons'outer, consr, consf, consT, conseq]
 
             let t'' = canonT $ Temporality TemporalityAggregate t'
             let s'  = si `compose` sw `compose` sq
@@ -444,14 +448,15 @@ generateQ qq@(Query (c:_) _) env
      -> do  (x', sx, consd)  <- generateX x env
             let x'typ = annResult $ annotOfExp x'
 
-            (q',sq,tq,consr) <- rest =<< goPat ann n x'typ (substE sx env)
+            (env'',consp)    <- goPat ann n x'typ (substE sx env)
+            (q',sq,tq,consr) <- rest env''
 
             retTmp   <- TypeVar <$> fresh
             let tmpx  = getTemporalityOrPure x'typ
-            let tmpq  = getTemporalityOrPure $ tq
+            let tmpq  = getTemporalityOrPure tq
 
             let consT = require a (CReturnOfLetTemporalities retTmp tmpx tmpq)
-            let cons' = concat [consd, consr, consT]
+            let cons' = concat [consd, consr, consp, consT]
 
             let t'    = canonT $ Temporality retTmp tq
 
@@ -466,59 +471,26 @@ generateQ qq@(Query (c:_) _) env
   goPat _ PatDefault _ e
     -- A Default _ binding doesn't effect the rest
     -- of the program.
-    = return e
+    = return (e,[])
   goPat _ (PatVariable n) typ e
     -- A binding variable is accessible downstream
     -- so bind it and its type to the environment.
-    = return $ bindT n typ e
+    = return (bindT n typ e, [])
   goPat ann (PatCon ConTuple [a'pat,b'pat]) typ e
-    -- As we can put a let at any temporality and
-    -- possibility, we need to decompose the pattern
-    -- and keep the possibility/temporality of the
-    -- values of the pair the same as the pair being
-    -- bound.
-    | (mt,mp,canon'typ) <- decomposeT $ canonT typ
-    , PairT a'typ b'typ <- canon'typ
-    = do
-      a'env <- goPat ann a'pat (recomposeT (mt, mp, a'typ)) e
-      b'env <- goPat ann b'pat (recomposeT (mt, mp, b'typ)) a'env
-      return b'env
-  goPat ann (PatCon ConTuple _) typ _
-    -- It's a type error, as we can't bind a non-pair
-    -- pattern to a pair. We don't have type variables
-    -- for the what the elements of the pair should be,
-    -- so draw some fresh ones.
-    = do
-      p1 <- TypeVar <$> fresh
-      p2 <- TypeVar <$> fresh
-      let (_,_,canon'typ) = decomposeT $ canonT typ
-      genHoistEither
-        $ errorNoSuggestions
-        $ ErrorConstraintsNotSatisfied ann
-          [(ann, CannotUnify (PairT p1 p2) canon'typ)]
+    -- We're binding a pair, summon type variables
+    -- for each side, and add a constraint on the
+    -- bound type that it match the pair of them.
+    = do p1        <- TypeVar <$> fresh
+         p2        <- TypeVar <$> fresh
+         let cons   = requireData typ (PairT p1 p2)
+         (a'e,a'c) <- goPat ann a'pat p1 e
+         (b'e,b'c) <- goPat ann b'pat p2 a'e
+         return (b'e, cons <> a'c <> b'c)
   goPat ann pat _ _
     -- It's not a pair, default or variable. All other
     -- patterns are Partial, so we disallow it.
     = genHoistEither
     $ errorNoSuggestions (ErrorPartialBinding ann pat)
-
-  -- Generate a fresh set of type variables which a
-  -- total pattern must match. This flow upwards into
-  -- a group fold.
-  patTy _ PatDefault
-    = TypeVar <$> fresh
-  patTy _ PatVariable {}
-    = TypeVar <$> fresh
-  patTy ann (PatCon ConTuple [a'pat,b'pat])
-    = do a'typ <- patTy ann a'pat
-         b'typ <- patTy ann b'pat
-         return (PairT a'typ b'typ)
-  patTy ann pat
-    -- It's not a pair, default or variable. All other
-    -- patterns are Partial, so we disallow it.
-    = genHoistEither
-    $ errorNoSuggestions (ErrorPartialBinding ann pat)
-
 
   a  = annotOfContext c
 

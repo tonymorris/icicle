@@ -107,6 +107,9 @@ script:
   # - ${CABAL} build $WITHCOMPILER --enable-tests --enable-benchmarks --dep -j2 all | color_cabal_output
   # Testing...
   - ${CABAL} test $WITHCOMPILER --enable-tests --enable-benchmarks icicle:test | color_cabal_output
+  - ${CABAL} install $WITHCOMPILER icicle | color_cabal_output
+  - ICICLE=icicle
+  - ${CABAL} test $WITHCOMPILER --enable-tests --enable-benchmarks icicle:test-cli | color_cabal_output
   # Export zebra executable to run.
   # FIXME also run CLI tests.
   # cabal check...

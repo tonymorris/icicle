@@ -33,6 +33,7 @@ module Icicle.Source.Query.Exp (
   , takeLams
   , makeLams
   , annotOfExp
+  , annotOfExpL
   , mkApp
   , precedenceOfX
   , listOfIntroducedFuns
@@ -40,6 +41,7 @@ module Icicle.Source.Query.Exp (
   ) where
 
 import           Control.Lens.Setter (over)
+import           Control.Lens(Plated(plate), Lens', view, _2)
 import qualified Data.Text as Text
 
 import           GHC.Generics (Generic)
@@ -84,6 +86,24 @@ data Exp' q a n
   deriving (Show, Eq, Ord, Generic)
 
 instance (NFData (q a n), NFData a, NFData n) => NFData (Exp' q a n)
+
+instance Plated (Exp' q a n) where
+  plate _ (Var a n) =
+    pure (Var a n)
+  plate f (Lam a n q) =
+    Lam a n <$> f q
+  plate _ (Nested a q) =
+    pure (Nested a q)
+  plate f (App a x y) =
+    App a <$> f x <*> f y
+  plate _ (Prim a p) =
+    pure (Prim a p)
+  plate f (If a pred true false) =
+    If a <$> f pred <*> f true <*> f false
+  plate f (Case a scrut pats) =
+    Case a <$> f scrut <*> (traverse . _2) f pats
+  plate f (Access a x n) =
+    Access a <$> f x <*> pure n
 
 -- | Icicle Source Language Primitives
 data Prim
@@ -182,16 +202,25 @@ takePrimApps x
  = Nothing
 
 annotOfExp :: Exp' q a n -> a
-annotOfExp x
- = case x of
-   Var    a _     -> a
-   Lam    a _ _   -> a
-   Nested a _     -> a
-   App    a _ _   -> a
-   Prim   a _     -> a
-   If     a _ _ _ -> a
-   Case   a _ _   -> a
-   Access a _ _   -> a
+annotOfExp = view annotOfExpL
+
+annotOfExpL :: Lens' (Exp' q a n) a
+annotOfExpL f (Var a n)=
+  fmap (\a' -> Var a' n) (f a)
+annotOfExpL f (Lam a n q)=
+  fmap (\a' -> Lam a' n q) (f a)
+annotOfExpL f (Nested a q)=
+  fmap (\a' -> Nested a' q) (f a)
+annotOfExpL f (App a x y)=
+  fmap (\a' -> App a' x y) (f a)
+annotOfExpL f (Prim a p)=
+  fmap (\a' -> Prim a' p) (f a)
+annotOfExpL f (If a pred true false)=
+  fmap (\a' -> If a' pred true false) (f a)
+annotOfExpL f (Case a scrut pats)=
+  fmap (\a' -> Case a' scrut pats) (f a)
+annotOfExpL f (Access a x n)=
+  fmap (\a' -> Access a' x n) (f a)
 
 mkApp :: Exp' q a n -> Exp' q a n -> Exp' q a n
 mkApp x y
